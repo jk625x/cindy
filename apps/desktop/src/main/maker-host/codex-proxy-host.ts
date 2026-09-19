@@ -1,7 +1,11 @@
 import { createAttachmentRecovery } from './oversized-attachment-recovery.js';
 import { clearCodexTextOnlyPolicies, codexTextOnlyRequestGuard, codexTextOnlyWebSocketTransforms, isCodexTextOnly } from './codex-text-only-policy.js';
-import { resolveConversationSessionHeaders, withChatBridgeUserAgent, overrideHeadersCaseInsensitive } from '@cindy/responses-chat-bridge';
-import { providerModelRecord } from '@cindy/model-providers';
+import {
+  resolveConversationSessionHeaders,
+  withChatBridgeUserAgent,
+  overrideHeadersCaseInsensitive,
+} from '@cindy/responses-chat-bridge';
+import { isCustomRoutedProvider, providerModelRecord } from '@cindy/model-providers';
 import { createPiProviderFetch, handlePiProviderRequest, invocationModelRecord, nativeBridgeApiKey, readBoundedResponseText, requiresNativeProviderAuth } from './pi-provider-transport.js';
 import { normalizeProviderRequest, normalizeMiniMaxResponsesReasoning } from '@cindy/model-compat';
 import { createCodexResponsesCompatibilityAdapter, sanitizeXaiTools, hasCacheOnlySearchProhibition, sanitizeByteDanceSeedTools, normalizeByteDanceSeedInput, sanitizeByteDanceSeedReasoning, normalizeStrictGatewayHistory, sanitizeDeepSeekV4CustomTools } from '@cindy/model-compat';
@@ -123,6 +127,7 @@ import { outboundFetch } from './outbound-fetch.js';
 import { desktopAnthropicImageCodec } from './anthropic-image-codec.js';
 import { readSilentEncryptedRetrySettings } from './silent-encrypted-retry-store.js';
 import { getLogDir } from '../logger.js';
+import { createCodexImageModelRewrite } from './codex-image-model-rewrite.js';
 import { recordXaiRateLimitSnapshot } from '../usageBroadcaster.js';
 import {
   CODEX_IMAGE_GENERATION_ACTOR_HEADER,
@@ -1085,10 +1090,10 @@ function createChatBridgeDecision(
   const { headers } = buildLocalHandlerHeaders(route, 'codex');
   const stripPrefix = route.routing.modelIdRewrite?.stripPrefix;
   const realModel = rewriteChatBridgeModel(wireModel, stripPrefix);
-  // localHandler 绕过 proxy 的 responseObserver,自定义(user)供应商的上游错误不会被
+  // localHandler 绕过 proxy 的 responseObserver,自定义(user/organization)供应商的上游错误不会被
   // createProviderUpstreamErrorObserver 看到。这里显式把非 2xx 上游错误喂回同一广播通道,
   // 让 Chat 桥接会话与透明自定义供应商一样弹结构化 providerError.* 提示。内置来源不广播
-  // (与 observer 的 user-only 语义一致)。
+  // (与 observer 的 custom-routed 语义一致)。
   const providerId = route.providerId;
   const providerName = getActiveCatalog().providers.find((p) => p.id === providerId)?.name ?? providerId;
   const baseCapabilities: ChatBridgeCapabilities = isGoogleGeminiChatUpstream(
@@ -1116,7 +1121,7 @@ function createChatBridgeDecision(
   const capabilities = systemMessagePolicy
     ? { ...routedCapabilities, systemMessagePolicy }
     : routedCapabilities;
-  const onUpstreamError = route.providerSource === 'user'
+  const onUpstreamError = isCustomRoutedProvider({ source: route.providerSource })
     ? ({ status, body }: { status: number; body: string }): void => {
         reportProviderUpstreamError({ agent: 'codex', providerId, providerName, status, bodyText: body });
       }
@@ -1437,7 +1442,7 @@ function createAnthropicBridgeDecision(
   const stripPrefix = route.routing.modelIdRewrite?.stripPrefix;
   const supportsPromptCaching =
     isXdGatewayBridge || isOfficialAnthropicUpstream(upstreamBase);
-  const onUpstreamError = route.providerSource === 'user'
+  const onUpstreamError = isCustomRoutedProvider({ source: route.providerSource })
     ? ({ status, body }: { status: number; body: string }): void => {
         reportProviderUpstreamError({ agent: 'codex', providerId, providerName, status, bodyText: body });
       }
@@ -2654,6 +2659,9 @@ function resolveCodexCustomProviderRoutingDecision(
         ...(headerDelete.size > 0 ? { headerDelete: [...headerDelete] } : {}),
         ...(parsed.pathKind === 'images'
           ? {
+              ...(frozenRouting.imageModel ? {
+                transformRequestBody: createCodexImageModelRewrite(frozenRouting.imageModel),
+              } : {}),
               forwardLifecycle: createCodexImageGenerationForwardLifecycleObserver(
                 parsed.routeId,
                 imagePathClass,
@@ -3084,7 +3092,7 @@ function createCodexProxyHandle(
     routeOpaqueRequestBody: (ctx) => isCodexCustomProviderNamespacePath(ctx.url),
     bypassRequestTransforms: (_body, ctx) => {
       const path = parseCodexCustomProviderPath(ctx.url);
-      // Image payloads (including JSON) retain their byte-for-byte bypass.
+      // Images skip chat transforms. Only a route-bound deployment alias may rewrite them.
       return path.kind !== 'not-custom-provider-route'
         && !(path.kind === 'route' && path.pathKind === 'responses');
     },

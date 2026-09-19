@@ -2,6 +2,7 @@ import type { WorktreeRecycleAction, WorktreeRecycleStatus } from '../shared/wor
 import { FAVORITE_HOST_READY, FAVORITE_HOST_REQUEST, FAVORITE_HOST_REPLY, FAVORITE_HOST_CHANGED, type ModelFavoritesHostApi } from '../shared/modelFavoritesSync';
 import { invokeOpenPath } from './openPath';
 import { COPY_PNG_TO_CLIPBOARD_CHANNEL, type CopyPngToClipboardParams } from '../shared/pngClipboard';
+import type { ByokStatus } from '../shared/modelAccess.js';
 import { REMOTE_VIEWER } from '../shared/remoteDesktopViewer';
 import type { RoutineInput } from '@cindy/maker-scheduler';
 import {
@@ -2007,6 +2008,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── 网关凭据自动下发(model-access,shared/modelAccess.ts) ──
   modelAccess: {
+    getByokStatus: (): Promise<ByokStatus> => ipcRenderer.invoke('model-access:byok-status'),
+    retryByok: (): Promise<ByokStatus> => ipcRenderer.invoke('model-access:byok-retry'),
     getStatus: (): Promise<ModelAccessStatusPayload> =>
       ipcRenderer.invoke('model-access:get-status'),
     retry: (): Promise<ModelAccessStatusPayload> => ipcRenderer.invoke('model-access:retry'),

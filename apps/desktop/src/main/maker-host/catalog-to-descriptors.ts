@@ -28,6 +28,7 @@ import {
   type Catalog,
   type CatalogModel,
   type AgentKind,
+  isCustomRoutedProvider,
 } from '@cindy/model-providers';
 import type { ModelDescriptor } from '@cindy/maker-core';
 import type { ModelCatalogOverrides } from './model-plane/localCatalogOverrides.js';
@@ -47,7 +48,7 @@ function isOfficialGrok46Id(modelId: string): boolean {
 
 interface SeenModelProjection {
   index: number;
-  includesUserProvider: boolean;
+  includesCustomRoutedProvider: boolean;
 }
 
 function hasValidPiReasoningCapabilities(m: CatalogModel): boolean {
@@ -161,20 +162,21 @@ export function deriveAvailableModels(catalog: Catalog, agent: AgentKind): Model
       // availableModels 是旧 mobile / device-link 等消费方的新选择清单，不能依赖下游
       // 再理解 retired。运行中会话仍从持久化 model + 完整 catalog 解析实际路由。
       const userProvider = provider.source === 'user';
+      const customRoutedProvider = isCustomRoutedProvider(provider);
       if (isLegacyGptContextProfile(provider, m.id)) continue;
       if (!isModelSelectableForNewRoute(m, { userProvider })) continue;
       const descriptor = toDescriptor(m, agent, {
         preserveExplicitPiEfforts:
-          userProvider ||
+          customRoutedProvider ||
           provider.id === 'xd' ||
           (provider.id === 'xai' && isOfficialGrok46Id(m.id)),
       });
       const previous = seen.get(m.id);
       if (previous) {
         let merged = out[previous.index];
-        if (agent === 'pi' && (previous.includesUserProvider || userProvider)) {
+        if (agent === 'pi' && (previous.includesCustomRoutedProvider || customRoutedProvider)) {
           merged = intersectPiEffortCapabilities(merged, descriptor);
-          previous.includesUserProvider ||= userProvider;
+          previous.includesCustomRoutedProvider ||= customRoutedProvider;
         }
         // 只有鉴权后的 XD /models 会被 active-catalog 投影成区域默认；公共 Registry 与
         // user provider 均不能借同 id 碰撞改变默认策略。
@@ -184,7 +186,7 @@ export function deriveAvailableModels(catalog: Catalog, agent: AgentKind): Model
         out[previous.index] = merged;
         continue;
       }
-      seen.set(m.id, { index: out.length, includesUserProvider: userProvider });
+      seen.set(m.id, { index: out.length, includesCustomRoutedProvider: customRoutedProvider });
       out.push(descriptor);
     }
   }
@@ -205,7 +207,7 @@ export function resolvePiRuntimeModelDescriptor(
 ): ModelDescriptor | null {
   const providers =
     providerId === 'cindy'
-      ? catalog.providers.filter((provider) => provider.source !== 'user')
+      ? catalog.providers.filter((provider) => !isCustomRoutedProvider(provider))
       : providerId
         ? catalog.providers.filter((provider) => provider.id === providerId)
         : catalog.providers;
@@ -214,7 +216,7 @@ export function resolvePiRuntimeModelDescriptor(
     if (model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' })) {
       return toDescriptor(model, 'pi', {
         preserveExplicitPiEfforts:
-          provider.source === 'user' ||
+          isCustomRoutedProvider(provider) ||
           provider.id === 'xd' ||
           (provider.id === 'xai' && isOfficialGrok46Id(model.id)),
       });
