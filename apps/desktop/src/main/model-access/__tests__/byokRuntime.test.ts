@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ByokProvidersResponse } from '@cindy/model-providers';
 const state = vi.hoisted(() => ({
   reader: null as null | ((id: string, agent: string) => string | null),
   endpointReader: null as null | ((id: string) => string | null),
@@ -304,6 +305,81 @@ describe('BYOK Main runtime', () => {
     expect(state.endpointReader?.('byok-a')).toBe('https://gateway.example.invalid/v1');
   });
 
+  it.each(['add-pi', 'pi-protocol', 'remove-pi', 'add-claude', 'add-image'] as const)(
+    'publishes %s changes under the lock without expiring the Codex snapshot', async (change) => {
+      const reloadCodex = vi.fn();
+      const runtime = createByokRuntime(undefined, undefined, reloadCodex);
+      runtime.setOwner({ scope: 'a:cn:1', organizationId: 'org-a' });
+      const initial: ByokProvidersResponse = {
+        schemaVersion: 1, organizationId: 'org-a', revision: '1',
+        providers: [{
+          id: 'byok-a', name: 'Enterprise', connectionRevision: 1,
+          imageBinding: {
+            enabled: true, modelId: 'gpt-image-2', wireModel: 'gpt-image-2',
+            litellmModel: 'byok-a/gpt-image-2', supportsEdit: true,
+          },
+          models: [{
+            id: 'byok-a/chat', name: 'Chat', contextWindow: 128000,
+            agents: ['codex', 'pi'], perAgent: {
+              codex: { wireProtocol: 'openai-responses' },
+              pi: { wireProtocol: 'openai-completions' },
+            },
+          }],
+        }],
+      };
+      state.fetch.mockResolvedValueOnce(initial).mockResolvedValueOnce(credentials);
+      await runtime.sync();
+      expect(reloadCodex).toHaveBeenCalledOnce();
+      state.gate.mockClear();
+      reloadCodex.mockClear();
+
+      const next = structuredClone(initial);
+      next.revision = '2';
+      const model = next.providers[0].models[0];
+      if (change === 'add-pi') {
+        next.providers[0].models.push({
+          id: 'byok-a/pi-only', name: 'Pi', contextWindow: 128000,
+          agents: ['pi'], perAgent: { pi: { wireProtocol: 'openai-completions' } },
+        });
+      } else if (change === 'pi-protocol') {
+        model.perAgent.pi!.wireProtocol = 'anthropic-messages';
+      } else if (change === 'remove-pi') {
+        model.agents = ['codex'];
+        delete model.perAgent.pi;
+      } else if (change === 'add-claude') {
+        model.agents!.push('claude-code');
+        model.perAgent['claude-code'] = { wireProtocol: 'anthropic-messages' };
+      } else {
+        next.providers[0].models.push({
+          id: 'byok-a/image', name: 'Image', mode: 'image_generation', agents: [], perAgent: {},
+        });
+      }
+      state.fetch.mockResolvedValueOnce(next).mockResolvedValueOnce(credentials);
+      await runtime.sync();
+      expect(runtime.getStatus().state).toBe('ready');
+      expect(state.gate).toHaveBeenCalledOnce();
+      const lock = state.gate.mock.results[0].value;
+      expect(lock).toHaveBeenCalledOnce();
+      expect(lock.commit).not.toHaveBeenCalled();
+      expect(reloadCodex).not.toHaveBeenCalled();
+      const published = state.publish.mock.lastCall![0][0];
+      if (change === 'add-pi') expect(published.models.pi).toHaveLength(2);
+      if (change === 'pi-protocol') expect(published.models.pi[0].piApi).toBe('anthropic-messages');
+      if (change === 'remove-pi') expect(state.reader?.('byok-a', 'pi')).toBeNull();
+      if (change === 'add-claude') expect(published.models['claude-code']).toHaveLength(1);
+      if (change === 'add-image') expect(published.imageModels).toHaveLength(1);
+
+      // The same unchanged Codex snapshot must still expire when the shared key rotates.
+      state.gate.mockClear();
+      const rotated = structuredClone(credentials);
+      rotated.credentials[0].apiKey = 'invalid-rotated-test-key';
+      state.fetch.mockResolvedValueOnce(next).mockResolvedValueOnce(rotated);
+      await runtime.sync();
+      expect(state.gate.mock.results[0].value.commit).toHaveBeenCalledOnce();
+      expect(reloadCodex).toHaveBeenCalledOnce();
+    },
+  );
+
   it('reloads Codex only when an applied enterprise image route or key changes', async () => {
     const reloadCodex = vi.fn();
     const runtime = createByokRuntime(undefined, undefined, reloadCodex);
@@ -352,7 +428,25 @@ describe('BYOK Main runtime', () => {
     await runtime.sync();
     expect(reloadCodex).toHaveBeenCalledTimes(2);
 
-    runtime.setOwner(null);
+    const moved = structuredClone(rotated);
+    moved.credentials[0].endpoint = 'https://replacement.example.invalid/v1';
+    state.fetch.mockResolvedValueOnce(metadataOnly).mockResolvedValueOnce(moved);
+    await runtime.sync();
+    expect(state.gate.mock.results.at(-1)?.value.commit).toHaveBeenCalledOnce();
     expect(reloadCodex).toHaveBeenCalledTimes(3);
+
+    const codexModelAdded = structuredClone(metadataOnly);
+    codexModelAdded.revision = '4';
+    codexModelAdded.providers[0].models.push({
+      ...codexModelAdded.providers[0].models[0], id: 'byok-a/another-codex-model',
+    });
+    state.fetch.mockResolvedValueOnce(codexModelAdded).mockResolvedValueOnce(moved);
+    await runtime.sync();
+    expect(state.gate.mock.results.at(-1)?.value.commit).toHaveBeenCalledOnce();
+    expect(reloadCodex).toHaveBeenCalledTimes(4);
+
+    runtime.setOwner(null);
+    expect(state.gate.mock.results.at(-1)?.value.commit).toHaveBeenCalledOnce();
+    expect(reloadCodex).toHaveBeenCalledTimes(5);
   });
 });

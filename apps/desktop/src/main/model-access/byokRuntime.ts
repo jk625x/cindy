@@ -17,6 +17,19 @@ import { createLogger } from '../logger.js';
 
 const log = createLogger('byokRuntime');
 
+// Only Codex freezes this generation. Pi/Claude/Art read live configuration;
+// their model changes still take the mutation lock, but must not expire an
+// unchanged Codex snapshot. Credentials and provider identity remain shared.
+function credentialRevisionState(state: ReturnType<typeof dispatchState>[number] | undefined) {
+  if (!state) return undefined;
+  return {
+    providerId: state.providerId,
+    credential: state.credential,
+    responseModels: state.chatModels.filter((model) => model.agents.includes('codex')).map((model) => model.id),
+    imageBinding: state.imageBinding,
+  };
+}
+
 function dispatchState(entries: readonly ByokProvider[], ready: readonly ByokConnection[]) {
   return entries
     .map((provider) => {
@@ -161,7 +174,13 @@ export function createByokRuntime(
         installedDirectory = structuredClone(directory);
         setByokPricing(nextPricing);
         setManagedProviders(nextProviders);
-        for (const gate of gates) gate.commit();
+        for (const [index, gate] of gates.entries()) {
+          const id = changedIds[index]!;
+          if (!isDeepStrictEqual(
+            credentialRevisionState(previousDispatchById.get(id)),
+            credentialRevisionState(nextDispatchById.get(id)),
+          )) gate.commit();
+        }
       } catch (error) {
         if (directory.length === 0 && connections.length === 0) {
           // Logout and a successfully empty directory must never resurrect secrets
