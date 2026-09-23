@@ -7,6 +7,7 @@ import {
   storedCustomProviderId,
   type Catalog,
   type CustomProviderConfig,
+  type Effort,
   type Provider,
   type RoutingDescriptor,
 } from '@cindy/model-providers';
@@ -46,6 +47,8 @@ export interface CodexCustomProviderRoute {
   routing: RoutingDescriptor;
   /** Per-model Responses routes frozen with the same Host snapshot. */
   responseRoutingByModel: Readonly<Record<string, RoutingDescriptor>>;
+  /** Model capabilities belong to the same Host generation as the upstream routes. */
+  responseEffortsByModel: Readonly<Record<string, readonly Effort[]>>;
   /** Non-sensitive route/capability/credential dispatch generation frozen with this Host snapshot. */
   credentialRevision: number;
 }
@@ -130,6 +133,9 @@ function routeForProvider(provider: Provider): CodexCustomProviderRoute | null {
     responseModels: responseModelIds,
     credentialRevision: getProviderRouteCredentialRevision(provider.id),
     routing: frozenRouting,
+    responseEffortsByModel: Object.fromEntries(
+      responseModels.map(model => [model.id, [...model.efforts]]),
+    ),
     responseRoutingByModel: Object.fromEntries(
       responseModels.map((model) => {
         if (!model.route) return [model.id, { ...frozenRouting }];
@@ -167,6 +173,9 @@ export function codexCustomProviderConfigSignature(config: CustomProviderConfig)
           ),
         ),
         responseModels: [...route.responseModels].sort(),
+        responseEffortsByModel: Object.fromEntries(
+          Object.entries(route.responseEffortsByModel).sort(([left], [right]) => left.localeCompare(right)),
+        ),
         routing: route.routing,
         responseRoutingByModel: Object.fromEntries(
           Object.entries(route.responseRoutingByModel).sort(([left], [right]) =>
@@ -216,6 +225,7 @@ export function codexCustomProviderRoutesSignature(
       responseModels: [...route.responseModels].sort(),
       routing: route.routing,
       responseRoutingByModel: route.responseRoutingByModel,
+      responseEffortsByModel: route.responseEffortsByModel,
       credentialRevision: route.credentialRevision,
     }))
     .sort((left, right) => left.modelProviderId.localeCompare(right.modelProviderId));
