@@ -1,5 +1,5 @@
 import type { ByokCache } from './byokCache.js';
-import { isByokImageMode, type ByokProvider, type Provider } from '@cindy/model-providers';
+import { BYOK_PROVIDERS_PATH, BYOK_CREDENTIALS_PATH, isByokImageMode, type ByokProvider, type Provider } from '@cindy/model-providers';
 import {
   setByokCredentialReader,
   setByokEndpointReader,
@@ -16,6 +16,26 @@ import { buildByokPricing, setByokPricing } from './byokPricing.js';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('byokRuntime');
+// Only service-defined codes may leave the sensitive response boundary.
+const BYOK_ERROR_CODES = [
+  'ORG_AI_GATEWAY_ERROR',
+  'BYOK_UNAVAILABLE',
+  'ORG_AI_MANAGEMENT_DISABLED',
+  'ORG_AI_NOT_ENABLED',
+  'ORG_AI_UNSUPPORTED',
+  'ORG_NOT_SUPPORTED',
+  'ORGANIZATION_BASELINE_NOT_READY',
+  'ORGANIZATION_SEAT_REQUIRED',
+  'MEMBERSHIP_INACTIVE',
+  'INVALID_PARAMS',
+  'UNAUTHORIZED',
+  'TOKEN_EXPIRED',
+  'INVALID_TOKEN',
+  'ACCOUNT_UNAVAILABLE',
+  'FORBIDDEN',
+  'RATE_LIMITED',
+  'INTERNAL_ERROR',
+] as const;
 
 // Only Codex freezes this generation. Pi/Claude/Art read live configuration;
 // their model changes still take the mutation lock, but must not expire an
@@ -138,14 +158,25 @@ export function createByokRuntime(
     });
   return createByokSync({
     cache,
-    fetch: (path, options) =>
-      serverApiFetch(path, {
+    fetch: async (path, options) => {
+      const logLabel = path === BYOK_PROVIDERS_PATH
+        ? '/api/model-access/byok/providers'
+        : path === BYOK_CREDENTIALS_PATH
+          ? '/api/model-access/byok/credentials'
+          : '/api/model-access/byok';
+      const startedAt = Date.now();
+      const response = await serverApiFetch(path, {
         ...options,
         baseUrl: () => getClientEndpoint('modelAccessApiBaseUrl'),
         redactErrorDetails: true,
+        logLabel,
+        allowedRedactedErrorCodes: BYOK_ERROR_CODES,
         // 与 byokSync 的 TIMEOUT_MS=20s 对齐：deadline 只赛跑不中止，这里让底层请求在同样时限真正 abort，不留悬挂连接
         timeoutMs: 20_000,
-      }),
+      });
+      log.debug('byok.sync.request_succeeded', 'path=' + logLabel, 'elapsedMs=' + (Date.now() - startedAt));
+      return response;
+    },
     replace: (_owner, connections, directory = connections.map((entry) => entry.provider)) => {
       if (
         isDeepStrictEqual(installed, connections) &&

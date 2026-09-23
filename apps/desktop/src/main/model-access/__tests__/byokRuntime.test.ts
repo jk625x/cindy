@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   publish: vi.fn(),
   fetch: vi.fn(),
   gate: vi.fn(),
+  debug: vi.fn(),
 }));
 vi.mock('../../maker-host/active-catalog.js', () => ({ setManagedProviders: state.publish }));
 vi.mock('../../maker-host/provider-route.js', () => ({
@@ -24,6 +25,7 @@ vi.mock('../byokCredentials.js', () => ({
   },
 }));
 vi.mock('../../serverApiClient.js', () => ({ serverApiFetch: state.fetch }));
+vi.mock('../../logger.js', () => ({ createLogger: () => ({ debug: state.debug, warn: vi.fn() }) }));
 vi.mock('../../clientEndpointsService.js', () => ({
   getClientEndpoint: () => 'https://api.example.invalid',
 }));
@@ -72,6 +74,26 @@ beforeEach(() => {
   state.gate.mockImplementation(() => Object.assign(vi.fn(), { commit: vi.fn() }));
 });
 describe('BYOK Main runtime', () => {
+  it('labels both sync requests and logs success without credentials', async () => {
+    const runtime = createByokRuntime();
+    runtime.setOwner({ scope: 'a:cn:1', organizationId: 'org-a' });
+    state.fetch.mockResolvedValueOnce(directory).mockResolvedValueOnce(credentials);
+    await runtime.sync();
+    for (const [index, endpoint] of ['providers', 'credentials'].entries()) {
+      const path = `/api/model-access/byok/${endpoint}`;
+      expect(state.fetch).toHaveBeenNthCalledWith(index + 1, `${path}?schemaVersion=1`, expect.objectContaining({
+        logLabel: path,
+        redactErrorDetails: true,
+        allowedRedactedErrorCodes: expect.arrayContaining(['ORG_AI_GATEWAY_ERROR', 'BYOK_UNAVAILABLE']),
+      }));
+      expect(state.debug).toHaveBeenCalledWith('byok.sync.request_succeeded', `path=${path}`, expect.stringMatching(/^elapsedMs=\d+$/));
+    }
+    expect(runtime.getStatus().state).toBe('ready');
+    const logged = JSON.stringify(state.debug.mock.calls);
+    expect(logged).not.toContain('invalid-test-key');
+    expect(logged).not.toContain('org-a');
+    expect(logged).not.toContain('gateway.example.invalid');
+  });
   it.each([
     'https://gateway.example.invalid',
     'https://gateway.example.invalid/v1',
